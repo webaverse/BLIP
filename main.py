@@ -4,8 +4,10 @@ from PIL import Image
 import requests
 import torch
 
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi import FastAPI, UploadFile, Form
 from fastapi.responses import HTMLResponse
+from typing import Optional
 
 from models.blip import blip_decoder, blip_feature_extractor
 from models.blip_vqa import blip_vqa
@@ -15,6 +17,14 @@ import uvicorn
 
 
 app = FastAPI()
+
+# cors
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 device = 'cuda:0'
 image_size = 384
@@ -54,8 +64,85 @@ def load_image_from_url(img_url, image_size, device):
 def main():
 	content = '''
 	<body>
+	<h3>Available options</h3>
+	<ul>
+	<li>Image Captioning: <i>GET</i> <a href='/image_captioning' target='_blank' style='text-decoration: inherit'> `/img_captioning`</a></li>
+	<li>Visual Question Answering: <i>GET</i> <a href='/vqa' target='_blank' style='text-decoration: inherit'>`/vqa`</a></li>
+	<li>Feature Extraction: <i>GET</i> <a href='/feature_extraction' target='_blank' style='text-decoration: inherit'> `/feature_extraction`</a></li>
+	<li>Image Text Matching: <i>GET</i> <a href='/image_text_matching' target='_blank' style='text-decoration: inherit'> `/image_text_matching`</a></li>
+	</ul>
+	</body>
+	'''
+	return HTMLResponse(content=content)
+
+
+@app.get('/image_captioning')
+def main():
+	content = '''
+	<body>
 	<form action="/upload" enctype="multipart/form-data" method="post">
-	<span>Task: </span><input name="task" type="text">
+	<input name="task" type="text" value="image_captioning" hidden>
+	<input name="file" type="file">
+	<br />
+	<br />
+	<input type="submit">
+	</form>
+	</body>
+	'''
+	return HTMLResponse(content=content)
+
+
+@app.get('/vqa')
+def main():
+	content = '''
+	<body>
+	<form action="/upload" enctype="multipart/form-data" method="post">
+	<input name="task" type="text" value="vqa" hidden>
+	<span>Question: </span><input name="question" type="text">
+	<br />
+	<br />
+	<input name="file" type="file">
+	<br />
+	<br />
+	<input type="submit">
+	</form>
+	</body>
+	'''
+	return HTMLResponse(content=content)
+
+
+@app.get('/feature_extraction')
+def main():
+	content = '''
+	<body>
+	<form action="/upload" enctype="multipart/form-data" method="post">
+	<input name="task" type="text" value="feature_extraction" hidden>
+	<span>Caption: </span><input name="caption" type="text">
+	<br />
+	<br />
+	<span>Mode (<i>multimodal, image or text</i>): </span><input name="mode" type="text" value="multimodal">
+	<br />
+	<br />
+	<input name="file" type="file">
+	<br />
+	<br />
+	<input type="submit">
+	</form>
+	</body>
+	'''
+	return HTMLResponse(content=content)
+
+
+@app.get('/image_text_matching')
+def main():
+	content = '''
+	<body>
+	<form action="/upload" enctype="multipart/form-data" method="post">
+	<input name="task" type="text" value="text_matching" hidden>
+	<span>Caption: </span><input name="caption" type="text">
+	<br />
+	<br />
+	<span>Match head (<i>itm or itc</i>): </span><input name="match_head" type="text" value="itm">
 	<br />
 	<br />
 	<input name="file" type="file">
@@ -69,7 +156,14 @@ def main():
 
 
 @app.post('/upload')
-async def upload_image(task: str = Form(), file: UploadFile = Form()):
+async def upload_image(
+	task: str = Form(),
+	question: Optional[str] = Form(None),
+	caption: Optional[str]  = Form(None),
+	mode: Optional[str]  = Form(None),
+	match_head: Optional[str] = Form(None),
+	file: UploadFile = Form()
+):
 	try:
 		img = file.file
 		image = load_image(img, image_size, device)
@@ -77,22 +171,28 @@ async def upload_image(task: str = Form(), file: UploadFile = Form()):
 		if task == 'image_captioning':
 			with torch.no_grad():
 				# beam search
-				caption = image_captioning_model.generate(image, sample=False, num_beams=3, max_length=20, min_length=5) 
+				result = image_captioning_model.generate(image, sample=False, num_beams=3, max_length=20, min_length=5) 
 				# nucleus sampling
 				# caption = model.generate(image, sample=True, top_p=0.9, max_length=20, min_length=5)
-				return {'Caption': caption[0]}
+				return {'Caption': result[0]}
 		if task == 'vqa':
 			with torch.no_grad():
-				caption = vqa_model.generate(image, sample=False, num_beams=3, max_length=20, min_length=5) 
-				return {'Caption': caption[0]}
+				answer = vqa_model(image, question, train=False, inference='generate')
+				return {'Answer': answer[0]}
 		if task == 'feature_extraction':
 			with torch.no_grad():
-				caption = feature_extraction_model.generate(image, sample=False, num_beams=3, max_length=20, min_length=5) 
-				return {'Caption': caption[0]}
+				result = feature_extraction_model(image, caption, mode) [0, 0]
+				return {'Result': result} # ?
 		if task == 'text_matching':
 			with torch.no_grad():
-				caption = image_text_matching_model.generate(image, sample=False, num_beams=3, max_length=20, min_length=5) 
-				return {'Caption': caption[0]}
+				if match_head == 'itm':
+					itm_output = image_text_matching_model(image, caption, match_head)
+					itm_score = torch.nn.functional.softmax(itm_output, dim=1)[:,1]
+					return {'The image and text is matched with a probability of %.4f'%itm_score}
+				elif match_head == 'itc':
+					itc_score = image_text_matching_model(image, caption, match_head)
+					return {'The image feature and text feature has a cosine similarity of %.4f'%itc_score}
+
 	except Exception as e:
 		return {'Error': e}
 
